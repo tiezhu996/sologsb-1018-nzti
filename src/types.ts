@@ -35,6 +35,16 @@ export interface SegmentFeedback {
   createdAt: string
 }
 
+export interface ArchivedGroup {
+  id: string
+  groupId: string
+  text: string
+  note: string
+  removedAt: string
+  feedback: SegmentFeedback[]
+  wordIssues: WordIssue[]
+}
+
 export interface Attempt {
   id: string
   number: number
@@ -61,11 +71,12 @@ export interface PracticeProject {
   targetDuration: number
   groups: SenseGroup[]
   attempts: Attempt[]
+  archivedGroups: ArchivedGroup[]
   errorCategories: string[]
   updatedAt: string
 }
 
 export interface PersistedPractice {
   project: PracticeProject
-  version: 1
+  version: number
 }

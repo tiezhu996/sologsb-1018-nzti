@@ -58,6 +58,7 @@ export function createSampleProject(): PracticeProject {
       }
     ],
     errorCategories: ['声调', '韵尾', '重音位置', '连读', '气息', '语速'],
+    archivedGroups: [],
     updatedAt: new Date().toISOString()
   }
 }

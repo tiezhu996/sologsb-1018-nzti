@@ -126,10 +126,50 @@
     selectedGroupId = id
   }
 
+  // 意群被移除时，把它绑定的反馈与错词收进归档（正文仍可在练习历史查看），
+  // 同时从各轮尝试里清掉评分/错词/反馈，使其退出进度与错词统计。
+  function archiveGroups(draft: PracticeProject, removed: SenseGroup[]) {
+    if (!removed.length) return
+    const removedIds = new Set(removed.map((group) => group.id))
+    for (const group of removed) {
+      draft.archivedGroups.push({
+        id: uid('archive'),
+        groupId: group.id,
+        text: group.text,
+        note: group.note,
+        removedAt: new Date().toISOString(),
+        feedback: draft.attempts.flatMap((attempt) => attempt.feedback.filter((item) => item.groupId === group.id)),
+        wordIssues: draft.attempts.flatMap((attempt) => attempt.wordIssues.filter((item) => item.groupId === group.id))
+      })
+    }
+    draft.attempts.forEach((attempt) => {
+      attempt.scores = attempt.scores.filter((score) => !removedIds.has(score.groupId))
+      attempt.wordIssues = attempt.wordIssues.filter((issue) => !removedIds.has(issue.groupId))
+      attempt.feedback = attempt.feedback.filter((item) => !removedIds.has(item.groupId))
+    })
+  }
+
+  function feedbackCountFor(groupId: string) {
+    return project.attempts.reduce((sum, attempt) => sum + attempt.feedback.filter((item) => item.groupId === groupId).length, 0)
+  }
+
+  function confirmArchive(groups: SenseGroup[]) {
+    const count = groups.reduce((sum, group) => sum + feedbackCountFor(group.id), 0)
+    if (!count) return true
+    const names = groups.map((group) => `「${group.text}」`).join('、')
+    return confirm(`意群 ${names} 已有 ${count} 条教师反馈。移除后会连同反馈一起归档，退出练习进度与错词统计，正文仍可在练习历史中查看。确定移除吗？`)
+  }
+
   function deleteGroup() {
     if (!selectedGroup || project.groups.length <= 1) return
-    const index = project.groups.findIndex((group) => group.id === selectedGroup.id)
-    editProject((draft) => { draft.groups = draft.groups.filter((group) => group.id !== selectedGroup?.id) })
+    const group = selectedGroup
+    if (!confirmArchive([group])) return
+    const index = project.groups.findIndex((item) => item.id === group.id)
+    editProject((draft) => {
+      const removed = draft.groups.filter((item) => item.id === group.id)
+      draft.groups = draft.groups.filter((item) => item.id !== group.id)
+      archiveGroups(draft, removed)
+    })
     selectedGroupId = project.groups[Math.max(0, index - 1)]?.id ?? ''
   }
 
@@ -147,16 +187,26 @@
   function splitSentence() {
     const parts = project.sentence.split(/[，。！？；、\n]+/).map((part) => part.trim()).filter(Boolean)
     if (parts.length < 2) return
+    // 先按文本对齐已有意群，保证挪动顺序后再切分，评分/错词/反馈仍跟着同一段走；
+    // 文本对不上时退回同位置复用，最后才新建。
+    const usedIds = new Set<string>()
+    const matched = parts.map((text, index) => {
+      const byText = project.groups.find((group) => !usedIds.has(group.id) && group.text === text)
+      const byPosition = project.groups[index] && !usedIds.has(project.groups[index].id) ? project.groups[index] : undefined
+      const group = byText ?? byPosition
+      if (group) usedIds.add(group.id)
+      return group
+    })
+    const dropped = project.groups.filter((group) => !usedIds.has(group.id))
+    if (dropped.length && !confirmArchive(dropped)) return
     editProject((draft) => {
-      draft.groups = parts.map((text, index) => ({
-        id: draft.groups[index]?.id ?? uid('group'),
-        text,
-        stressWords: draft.groups[index]?.stressWords ?? [],
-        stressLevel: draft.groups[index]?.stressLevel ?? 1,
-        pauseMs: draft.groups[index]?.pauseMs ?? 300,
-        intonation: draft.groups[index]?.intonation ?? 'flat',
-        note: draft.groups[index]?.note ?? ''
-      }))
+      draft.groups = parts.map((text, index) => {
+        const existing = matched[index]
+        return existing
+          ? { ...existing, text }
+          : { id: uid('group'), text, stressWords: [], stressLevel: 1 as const, pauseMs: 300, intonation: 'flat' as const, note: '' }
+      })
+      archiveGroups(draft, dropped)
     })
     selectedGroupId = project.groups[0]?.id ?? ''
   }
@@ -677,6 +727,31 @@
             <div><span>{category.category}</span><div class="mini-bar"><i style={`width:${Math.min(100, category.count * 18)}%`}></i></div><strong>{category.count}</strong></div>
           {/each}
         </div>
+        {#if project.archivedGroups.length}
+          <div class="archive-section">
+            <div class="section-heading">
+              <div><span class="eyebrow">HISTORY</span><h2>练习历史 · 已归档意群</h2></div>
+              <span class="chapter-badge">{project.archivedGroups.length} 段</span>
+            </div>
+            <div class="archive-list">
+              {#each [...project.archivedGroups].reverse() as entry (entry.id)}
+                <div class="archive-item">
+                  <div class="archive-head">
+                    <strong>{entry.text}</strong>
+                    <small>归档于 {new Date(entry.removedAt).toLocaleString('zh-CN')} · {entry.feedback.length} 条反馈 · {entry.wordIssues.length} 条错词 · 已退出进度与统计</small>
+                  </div>
+                  {#each entry.feedback as feedback (feedback.id)}
+                    <div class="feedback-item">
+                      <strong>{feedback.teacher}</strong>
+                      <p>{feedback.text}</p>
+                      <small>{new Date(feedback.createdAt).toLocaleString('zh-CN')}</small>
+                    </div>
+                  {/each}
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
         <div class="inline-actions">
           <input class="input" bind:value={newCategory} placeholder="新增错词分类" />
           <button class="btn btn-sm variant-soft" on:click={addCategory}>添加分类</button>
