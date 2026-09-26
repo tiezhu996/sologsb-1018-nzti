@@ -43,14 +43,25 @@
   let selectedGroup: SenseGroup | undefined
   let selectedAttempt: Attempt | undefined
 
-  $: selectedGroup = project.groups.find((group) => group.id === selectedGroupId) ?? project.groups[0]
+  $: activeGroups = project.groups.filter((group) => !group.archivedAt)
+  $: archivedGroups = project.groups.filter((group) => group.archivedAt)
+  $: activeGroupIds = new Set(activeGroups.map((group) => group.id))
+  $: selectedGroup = activeGroups.find((group) => group.id === selectedGroupId) ?? activeGroups[0]
   $: selectedAttempt = project.attempts.find((attempt) => attempt.id === selectedAttemptId) ?? project.attempts.at(-1)
   $: selectedScore = selectedAttempt && selectedGroup ? selectedAttempt.scores.find((score) => score.groupId === selectedGroup?.id) : undefined
   $: completedAttempts = Math.min(project.attempts.length, project.targetAttempts)
   $: progress = Math.round((completedAttempts / Math.max(project.targetAttempts, 1)) * 100)
-  $: averageAccuracy = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.accuracy, 0) / selectedAttempt.scores.length) : 0
-  $: averageDeviation = selectedAttempt?.scores.length ? Math.round(selectedAttempt.scores.reduce((sum, score) => sum + score.deviation, 0) / selectedAttempt.scores.length) : 0
-  $: totalIssueCategories = project.errorCategories.map((category) => ({ category, count: project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length }))
+  $: selectedActiveScores = selectedAttempt ? selectedAttempt.scores.filter((score) => activeGroupIds.has(score.groupId)) : []
+  $: averageAccuracy = selectedActiveScores.length ? Math.round(selectedActiveScores.reduce((sum, score) => sum + score.accuracy, 0) / selectedActiveScores.length) : 0
+  $: averageDeviation = selectedActiveScores.length ? Math.round(selectedActiveScores.reduce((sum, score) => sum + score.deviation, 0) / selectedActiveScores.length) : 0
+  $: activeWordIssues = project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => activeGroupIds.has(issue.groupId))
+  $: totalIssueCategories = project.errorCategories.map((category) => ({ category, count: activeWordIssues.filter((issue) => issue.category === category).length }))
+
+  /** 只统计活动意群的评分，归档意群退出进度 */
+  function attemptAverage(attempt: Attempt): number {
+    const scores = attempt.scores.filter((score) => activeGroupIds.has(score.groupId))
+    return scores.length ? Math.round(scores.reduce((sum, score) => sum + score.accuracy, 0) / scores.length) : 0
+  }
 
   const clone = <T,>(value: T): T => structuredClone(value)
   const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -121,45 +132,80 @@
   function addGroup() {
     const id = uid('group')
     editProject((draft) => {
-      draft.groups.push({ id, text: '新的意群', stressWords: [], stressLevel: 1, pauseMs: 300, intonation: 'flat', note: '' })
+      draft.groups.push({ id, text: '新的意群', stressWords: [], stressLevel: 1, pauseMs: 300, intonation: 'flat', note: '', archivedAt: null })
     })
     selectedGroupId = id
   }
 
-  function deleteGroup() {
-    if (!selectedGroup || project.groups.length <= 1) return
-    const index = project.groups.findIndex((group) => group.id === selectedGroup.id)
-    editProject((draft) => { draft.groups = draft.groups.filter((group) => group.id !== selectedGroup?.id) })
-    selectedGroupId = project.groups[Math.max(0, index - 1)]?.id ?? ''
+  /**
+   * 移除意群：被任何一轮尝试引用时只做归档（退出进度与错词统计，
+   * 正文与记录留在练习历史可查）；已有教师反馈时先说明归档后果再确认。
+   */
+  function removeGroup() {
+    if (!selectedGroup || activeGroups.length <= 1) return
+    const target = selectedGroup
+    const hasFeedback = project.attempts.some((attempt) => attempt.feedback.some((item) => item.groupId === target.id))
+    if (hasFeedback && !confirm(`「${target.text}」已有教师反馈。移除后该段会归档：不再计入练习进度与错词统计，正文和反馈仍可在「反馈进度 · 练习历史」中查看。确定移除吗？`)) return
+    const referenced = project.attempts.some((attempt) =>
+      attempt.scores.some((score) => score.groupId === target.id) ||
+      attempt.wordIssues.some((issue) => issue.groupId === target.id) ||
+      attempt.feedback.some((item) => item.groupId === target.id)
+    )
+    const index = activeGroups.findIndex((group) => group.id === target.id)
+    editProject((draft) => {
+      if (referenced) {
+        const group = draft.groups.find((item) => item.id === target.id)
+        if (group) group.archivedAt = new Date().toISOString()
+      } else {
+        draft.groups = draft.groups.filter((group) => group.id !== target.id)
+      }
+    })
+    selectedGroupId = activeGroups.filter((group) => group.id !== target.id)[Math.max(0, index - 1)]?.id ?? ''
   }
 
   function moveGroup(direction: -1 | 1) {
     if (!selectedGroup) return
-    const index = project.groups.findIndex((group) => group.id === selectedGroup?.id)
+    const activeIds = activeGroups.map((group) => group.id)
+    const index = activeIds.indexOf(selectedGroup.id)
     const next = index + direction
-    if (next < 0 || next >= project.groups.length) return
+    if (index < 0 || next < 0 || next >= activeIds.length) return
     editProject((draft) => {
-      const [group] = draft.groups.splice(index, 1)
-      draft.groups.splice(next, 0, group)
+      // 记录按 groupId 绑定，意群换位后评分、错词、反馈自然跟到同一段
+      const fromPos = draft.groups.findIndex((group) => group.id === activeIds[index])
+      const toPos = draft.groups.findIndex((group) => group.id === activeIds[next])
+      const [moved] = draft.groups.splice(fromPos, 1)
+      draft.groups.splice(toPos, 0, moved)
     })
   }
 
+  /**
+   * 按标点切分：按归一化文本匹配旧意群并复用其 id，记录跟着文本走；
+   * 匹配不上的旧意群归档保留记录，而不是按位置错配或直接丢弃。
+   */
   function splitSentence() {
     const parts = project.sentence.split(/[，。！？；、\n]+/).map((part) => part.trim()).filter(Boolean)
     if (parts.length < 2) return
     editProject((draft) => {
-      draft.groups = parts.map((text, index) => ({
-        id: draft.groups[index]?.id ?? uid('group'),
-        text,
-        stressWords: draft.groups[index]?.stressWords ?? [],
-        stressLevel: draft.groups[index]?.stressLevel ?? 1,
-        pauseMs: draft.groups[index]?.pauseMs ?? 300,
-        intonation: draft.groups[index]?.intonation ?? 'flat',
-        note: draft.groups[index]?.note ?? ''
-      }))
+      const pool = draft.groups.filter((group) => !group.archivedAt)
+      const archived = draft.groups.filter((group) => group.archivedAt)
+      const used = new Set<string>()
+      const next: SenseGroup[] = parts.map((text) => {
+        const key = normalizeGroupText(text)
+        const match = pool.find((group) => !used.has(group.id) && normalizeGroupText(group.text) === key)
+        if (match) {
+          used.add(match.id)
+          return { ...match, text }
+        }
+        return { id: uid('group'), text, stressWords: [], stressLevel: 1, pauseMs: 300, intonation: 'flat', note: '', archivedAt: null }
+      })
+      const stamp = new Date().toISOString()
+      const retired = pool.filter((group) => !used.has(group.id)).map((group) => ({ ...group, archivedAt: group.archivedAt ?? stamp }))
+      draft.groups = [...next, ...archived, ...retired]
     })
-    selectedGroupId = project.groups[0]?.id ?? ''
+    selectedGroupId = activeGroups[0]?.id ?? ''
   }
+
+  const normalizeGroupText = (text: string) => text.replace(/[\p{P}\p{S}\s]/gu, '')
 
   function updateSentence(value: string) {
     editProject((draft) => { draft.sentence = value })
@@ -214,7 +260,7 @@
       simulated,
       rangeStart: 0,
       rangeEnd: duration,
-      scores: project.groups.map((group) => ({ groupId: group.id, accuracy: 70, rhythm: 70, deviation: 0, note: '' })),
+      scores: activeGroups.map((group) => ({ groupId: group.id, accuracy: 70, rhythm: 70, deviation: 0, note: '' })),
       wordIssues: [],
       feedback: [],
       selfNote: ''
@@ -381,9 +427,9 @@
       moveGroup(event.key === 'ArrowUp' ? -1 : 1)
     } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return
-      const index = project.groups.findIndex((group) => group.id === selectedGroupId)
+      const index = activeGroups.findIndex((group) => group.id === selectedGroupId)
       const next = index + (event.key === 'ArrowLeft' ? -1 : 1)
-      if (project.groups[next]) selectedGroupId = project.groups[next].id
+      if (activeGroups[next]) selectedGroupId = activeGroups[next].id
     }
   }
 
@@ -391,7 +437,7 @@
     online = navigator.onLine
     const saved = await loadPractice()
     if (saved) project = saved
-    selectedGroupId = project.groups[0]?.id ?? ''
+    selectedGroupId = project.groups.find((group) => !group.archivedAt)?.id ?? ''
     selectedAttemptId = project.attempts.at(-1)?.id ?? ''
     loaded = true
     saveStatus = saved ? '已恢复本机练习' : '示例练习已就绪'
@@ -469,10 +515,10 @@
       </label>
       <div class="inline-actions">
         <button class="btn btn-sm variant-soft" on:click={splitSentence}>按标点智能切分</button>
-        <span>{project.groups.length} 个意群</span>
+        <span>{activeGroups.length} 个意群{#if archivedGroups.length} · {archivedGroups.length} 段已归档{/if}</span>
       </div>
       <div class="group-list">
-        {#each project.groups as group, index (group.id)}
+        {#each activeGroups as group, index (group.id)}
           <button class:active={group.id === selectedGroup?.id} class="group-item" on:click={() => selectGroup(group.id)}>
             <span class="group-index">{String(index + 1).padStart(2, '0')}</span>
             <span class="group-copy">
@@ -485,7 +531,7 @@
       <div class="sidebar-actions">
         <button class="btn btn-sm variant-ghost" on:click={() => moveGroup(-1)}>上移</button>
         <button class="btn btn-sm variant-ghost" on:click={() => moveGroup(1)}>下移</button>
-        <button class="btn btn-sm variant-ghost text-error-500" on:click={deleteGroup}>删除意群</button>
+        <button class="btn btn-sm variant-ghost text-error-500" on:click={removeGroup}>移除意群</button>
       </div>
       <div class="shortcut-note">
         <strong>快捷操作</strong>
@@ -499,7 +545,7 @@
         <div class="card annotation-card">
           <div class="section-heading">
             <div><span class="eyebrow">PROSODY MARKUP</span><h2>发音与韵律标注</h2></div>
-            <span class="chapter-badge">意群 {project.groups.findIndex((group) => group.id === selectedGroup?.id) + 1}</span>
+            <span class="chapter-badge">意群 {activeGroups.findIndex((group) => group.id === selectedGroup?.id) + 1}</span>
           </div>
           <label class="label">
             <span>意群文本</span>
@@ -585,7 +631,7 @@
             <button class:active={attempt.id === selectedAttempt?.id} class="attempt-item" on:click={() => { selectedAttemptId = attempt.id; stopPlayback() }}>
               <span class="attempt-number">{attempt.number}</span>
               <span><strong>{attempt.label}</strong><small>{attempt.duration.toFixed(1)}s · {attempt.simulated ? '模拟' : '录音'}</small></span>
-              <span class="attempt-score">{attempt.scores.length ? Math.round(attempt.scores.reduce((sum, score) => sum + score.accuracy, 0) / attempt.scores.length) : 0}%</span>
+              <span class="attempt-score">{attemptAverage(attempt)}%</span>
             </button>
           {/each}
         </div>
@@ -670,7 +716,7 @@
           <div><strong>{project.attempts.length}</strong><span>累计尝试</span></div>
           <div><strong>{averageAccuracy}%</strong><span>当前准确度</span></div>
           <div><strong>{averageDeviation}%</strong><span>平均偏差</span></div>
-          <div><strong>{project.errorCategories.reduce((sum, category) => sum + project.attempts.flatMap((attempt) => attempt.wordIssues).filter((issue) => issue.category === category).length, 0)}</strong><span>错词记录</span></div>
+          <div><strong>{activeWordIssues.length}</strong><span>错词记录</span></div>
         </div>
         <div class="category-list">
           {#each totalIssueCategories as category}
@@ -682,6 +728,36 @@
           <button class="btn btn-sm variant-soft" on:click={addCategory}>添加分类</button>
           <button class="btn btn-sm variant-ghost text-error-500" on:click={deleteAllData}>清除本机数据</button>
         </div>
+        {#if archivedGroups.length}
+          <div class="history-block">
+            <div class="section-heading">
+              <div><span class="eyebrow">ARCHIVE</span><h2>练习历史 · 已归档意群</h2></div>
+              <span class="chapter-badge">{archivedGroups.length} 段</span>
+            </div>
+            <p class="history-hint">已归档的意群不再计入上方进度与错词统计，正文和当时的评分、错词、教师反馈保留在这里。</p>
+            {#each archivedGroups as group (group.id)}
+              <div class="history-item">
+                <div class="history-head">
+                  <strong>{group.text}</strong>
+                  <small>归档于 {new Date(group.archivedAt ?? '').toLocaleString('zh-CN')}</small>
+                </div>
+                {#each project.attempts as attempt (attempt.id)}
+                  {@const scores = attempt.scores.filter((score) => score.groupId === group.id)}
+                  {@const issues = attempt.wordIssues.filter((issue) => issue.groupId === group.id)}
+                  {@const feedbacks = attempt.feedback.filter((item) => item.groupId === group.id)}
+                  {#if scores.length || issues.length || feedbacks.length}
+                    <div class="history-attempt">
+                      <span class="history-attempt-label">{attempt.label}</span>
+                      {#each scores as score}<small>准确 {score.accuracy}% · 节奏 {score.rhythm}% · 偏差 {score.deviation}%{score.note ? ` · ${score.note}` : ''}</small>{/each}
+                      {#each issues as issue}<small>错词「{issue.word}」· {issue.category}{issue.note ? ` · ${issue.note}` : ''}</small>{/each}
+                      {#each feedbacks as item}<small>{item.teacher}：{item.text}</small>{/each}
+                    </div>
+                  {/if}
+                {/each}
+              </div>
+            {/each}
+          </div>
+        {/if}
       </section>
     {/if}
   </main>

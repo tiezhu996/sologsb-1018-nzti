@@ -2,10 +2,10 @@ import type { PracticeProject } from './types'
 
 export function createSampleProject(): PracticeProject {
   const groups = [
-    { id: 'group-1', text: '清晨的海风', stressWords: ['海风'], stressLevel: 2 as const, pauseMs: 420, intonation: 'flat' as const, note: '平稳起句，不要咬字过重。' },
-    { id: 'group-2', text: '掠过旧码头', stressWords: ['掠过'], stressLevel: 2 as const, pauseMs: 360, intonation: 'fall' as const, note: '“掠”字轻，避免拖成长音。' },
-    { id: 'group-3', text: '也吹动了她手里的信', stressWords: ['她', '信'], stressLevel: 3 as const, pauseMs: 520, intonation: 'rise-fall' as const, note: '“她”后稍停，句尾自然下落。' },
-    { id: 'group-4', text: '像一句迟到了很多年的回答', stressWords: ['很多年', '回答'], stressLevel: 3 as const, pauseMs: 300, intonation: 'fall-rise' as const, note: '最后形成回味，不要突然拔高。' }
+    { id: 'group-1', text: '清晨的海风', stressWords: ['海风'], stressLevel: 2 as const, pauseMs: 420, intonation: 'flat' as const, note: '平稳起句，不要咬字过重。', archivedAt: null },
+    { id: 'group-2', text: '掠过旧码头', stressWords: ['掠过'], stressLevel: 2 as const, pauseMs: 360, intonation: 'fall' as const, note: '“掠”字轻，避免拖成长音。', archivedAt: null },
+    { id: 'group-3', text: '也吹动了她手里的信', stressWords: ['她', '信'], stressLevel: 3 as const, pauseMs: 520, intonation: 'rise-fall' as const, note: '“她”后稍停，句尾自然下落。', archivedAt: null },
+    { id: 'group-4', text: '像一句迟到了很多年的回答', stressWords: ['很多年', '回答'], stressLevel: 3 as const, pauseMs: 300, intonation: 'fall-rise' as const, note: '最后形成回味，不要突然拔高。', archivedAt: null }
   ]
   return {
     title: '电影独白 · 海风与回信',

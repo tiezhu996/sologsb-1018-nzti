@@ -9,6 +9,8 @@ export interface SenseGroup {
   pauseMs: number
   intonation: Intonation
   note: string
+  /** 非空表示已归档：退出进度与错词统计，但正文与记录保留在练习历史中 */
+  archivedAt: string | null
 }
 
 export interface GroupScore {
@@ -67,5 +69,8 @@ export interface PracticeProject {
 
 export interface PersistedPractice {
   project: PracticeProject
-  version: 1
+  version: number
 }
+
+/** 当前持久化结构版本：v2 起意群带 archivedAt，记录随意群归档而非悬空 */
+export const PRACTICE_VERSION = 2

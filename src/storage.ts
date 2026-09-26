@@ -1,4 +1,5 @@
-import type { PersistedPractice, PracticeProject } from './types'
+import { migratePractice } from './migrate'
+import { PRACTICE_VERSION, type PersistedPractice, type PracticeProject } from './types'
 
 const DB_NAME = 'sologsb-1018-prosody'
 const STORE = 'practice'
@@ -17,6 +18,15 @@ function openDb(): Promise<IDBDatabase> {
   })
 }
 
+function loadFallback(): PracticeProject | null {
+  try {
+    const raw = localStorage.getItem(FALLBACK_KEY)
+    return raw ? migratePractice(JSON.parse(raw)) : null
+  } catch {
+    return null
+  }
+}
+
 export async function loadPractice(): Promise<PracticeProject | null> {
   try {
     const db = await openDb()
@@ -27,16 +37,16 @@ export async function loadPractice(): Promise<PracticeProject | null> {
       request.onerror = () => reject(request.error)
     })
     db.close()
-    if (value?.project) return value.project
+    const migrated = migratePractice(value)
+    if (migrated) return migrated
   } catch {
-    const raw = localStorage.getItem(FALLBACK_KEY)
-    if (raw) return JSON.parse(raw) as PracticeProject
+    // IndexedDB 不可用（隐私模式等），退回本地备份。
   }
-  return null
+  return loadFallback()
 }
 
 export async function savePractice(project: PracticeProject): Promise<'indexeddb' | 'localstorage'> {
-  const value: PersistedPractice = { project, version: 1 }
+  const value: PersistedPractice = { project, version: PRACTICE_VERSION }
   try {
     const db = await openDb()
     await new Promise<void>((resolve, reject) => {
@@ -48,7 +58,10 @@ export async function savePractice(project: PracticeProject): Promise<'indexeddb
     db.close()
     return 'indexeddb'
   } catch {
-    const fallback = { ...project, attempts: project.attempts.map((attempt) => ({ ...attempt, audioBlob: undefined })) }
+    const fallback: PersistedPractice = {
+      version: PRACTICE_VERSION,
+      project: { ...project, attempts: project.attempts.map((attempt) => ({ ...attempt, audioBlob: undefined })) }
+    }
     localStorage.setItem(FALLBACK_KEY, JSON.stringify(fallback))
     return 'localstorage'
   }
